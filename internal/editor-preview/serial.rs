@@ -650,7 +650,7 @@ fn handshake(
                 }
                 if protocol != PROTOCOL_VERSION {
                     return Err(format!(
-                        "The device speaks protocol {protocol}, not {PROTOCOL_VERSION}: flash the firmware built from these Slint sources"
+                        "The device speaks protocol {protocol}, not {PROTOCOL_VERSION}: flash the viewer firmware of this exact Slint version"
                     ));
                 }
                 log(format!("Connected to {board}"));
@@ -666,7 +666,7 @@ fn handshake(
             Ok(Input::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 return Err(
-                    "The device didn't answer: is it running the Slint viewer firmware built from these Slint sources?".into()
+                    "The device didn't answer: does it run the viewer firmware of this exact Slint version?".into()
                 );
             }
         }
