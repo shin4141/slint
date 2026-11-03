@@ -155,7 +155,7 @@ component SavedDevicesPage inherits Rectangle {
                             overflow: elide;
                         }
                         Text {
-                            text: index == 0 ? @tr("This computer") : device.unavailable-reason != "" ? device.unavailable-reason : @tr("Available · {}", device.address);
+                            text: index == 0 ? @tr("This computer") : device.unavailable-reason != "" ? device.unavailable-reason : device.kind == PreviewEndpointKind.SerialPath ? @tr("Pseudo-terminal") : @tr("Available · {}", device.address);
                             color: ViewerStyle.muted;
                             font-size: Typography.caption.size;
                             overflow: elide;
@@ -309,11 +309,6 @@ component NearbyDevicesPage inherits Rectangle {
             label: @tr("Add pseudo-terminal path...");
             activated => { root.pseudo-terminal(); }
         }
-        Text {
-            text: @tr("Don't see your remote device?");
-            color: ViewerStyle.ink;
-            font-size: Typography.caption.size;
-        }
         FallbackAction {
             label: @tr("Enter IP address...");
             activated => { root.manual(); }
@@ -427,7 +422,8 @@ component ManualAddressPage inherits Rectangle {
 
 component PairingPage inherits Rectangle {
     in-out property <string> code;
-    private property <bool> serial: Springboard.selected-endpoint.kind == PreviewEndpointKind.Serial;
+    private property <bool> serial: Springboard.selected-endpoint.kind == PreviewEndpointKind.Serial
+        || Springboard.selected-endpoint.kind == PreviewEndpointKind.SerialPath;
     preferred-height: content.preferred-height;
     content := VerticalLayout {
         spacing: Metrics.space-medium;

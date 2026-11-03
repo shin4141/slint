@@ -676,11 +676,17 @@ impl SpringboardTask {
                 ..Default::default()
             },
             EndpointIdentity::Serial(identity) => self.serial_row(identity),
-            // Never disabled, as a manual endpoint
             EndpointIdentity::SerialPath { path } => ui::PreviewEndpoint {
                 name: path.into(),
-                kind: ui::PreviewEndpointKind::Serial,
+                kind: ui::PreviewEndpointKind::SerialPath,
                 address: path.into(),
+                unavailable_reason: if identity == &self.selected_endpoint
+                    && self.connection.state == ui::ConnectionState::Failed
+                {
+                    self.connection.error.as_str().into()
+                } else {
+                    Default::default()
+                },
                 ..Default::default()
             },
         }
