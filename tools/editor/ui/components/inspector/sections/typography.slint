@@ -10,11 +10,7 @@ import { InspectorSpinField } from "../spin-field.slint";
 export component InspectorTypographySection inherits InspectorSection {
     in property <InspectorStyle> style: Style.inspector-layout;
     in property <length> field-width;
-    private property <PropertyValue> runtime-italic: Api.runtime-property-value-data("font-italic", {});
-    private property <PropertyValue> source-italic: Api.source-property-value-data("font-italic", {});
-    private property <bool> italic: root.runtime-italic.value-resolved
-        ? root.runtime-italic.value-bool
-        : root.source-italic.code != "" && root.source-italic.value-bool;
+    private property <bool> italic: Api.editor-property-value-data("font-italic").value-bool;
     private property <PropertyValue> runtime-size: Api.runtime-property-value-data("font-size", { value-float: Api.preview-default-font-size });
 
     title: @tr("Typography");
