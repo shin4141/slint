@@ -59,8 +59,8 @@ function startView({ fetch, captureError, compile, toolCallError, missingImage }
         },
     });
     const elements = new Map(
-        ["status", "preview", "diagnostics", "stage", "annotate",
-            "annotation-hint", "annotation-layer", "annotation-snapshot", "annotation-pin",
+        ["status", "preview", "diagnostics", "stage", "preview-frame", "annotate",
+            "annotation-layer", "annotation-snapshot", "annotation-pin",
             "annotation-editor", "annotation-comment", "annotation-send", "annotation-error",
             "preview-tools", "preview-light", "preview-dark"].map((id) => [
             id,
