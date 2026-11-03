@@ -168,10 +168,10 @@ fn validate<'a>(
     };
     let names = names(name)?;
     (value.is_finite()
-        && if name == "font-size" {
-            value > 0.
-        } else {
-            name == "transform-rotation" || value >= 0.
+        && match name {
+            "font-size" => value > 0.,
+            "transform-rotation" => true,
+            _ => value >= 0.,
         })
     .then_some((node, url, version, names))
 }
