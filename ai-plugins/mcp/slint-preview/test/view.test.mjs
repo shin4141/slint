@@ -33,6 +33,9 @@ function startView({ fetch, captureError, compile, toolCallError, missingImage }
     });
     const element = () => ({
         style: { setProperty() {} },
+        addEventListener() {},
+        setAttribute() {},
+        hidePopover() {},
         dataset: {},
         classList: { add() {}, remove() {} },
         textContent: "",
@@ -56,7 +59,10 @@ function startView({ fetch, captureError, compile, toolCallError, missingImage }
         },
     });
     const elements = new Map(
-        ["status", "preview", "diagnostics", "stage"].map((id) => [
+        ["status", "preview", "diagnostics", "stage", "annotate",
+            "annotation-hint", "annotation-layer", "annotation-snapshot", "annotation-pin",
+            "annotation-editor", "annotation-comment", "annotation-send", "annotation-error",
+            "annotation-cancel", "preview-tools-toggle", "preview-tools-panel", "preview-light", "preview-dark"].map((id) => [
             id,
             element(),
         ]),
@@ -133,6 +139,7 @@ function startView({ fetch, captureError, compile, toolCallError, missingImage }
     const context = {
         window,
         document: {
+            addEventListener() {},
             getElementById: (id) => elements.get(id),
             documentElement: { style: {} },
             body: element(),
