@@ -299,6 +299,9 @@ pub fn initialize_editor(
         source_property_value(&api, property_name, fallback)
     });
     api.on_combo_option_index(combo_option_index);
+    api.on_combo_option_values(|options| {
+        Rc::new(slint::MapModel::new(options, |option| option.value)).into()
+    });
     api.on_image_source_file_name(file_tree::image_source_file_name);
     let editor_weak = editor_ui.as_weak();
     api.on_choose_image_file(move |source_uri| {
