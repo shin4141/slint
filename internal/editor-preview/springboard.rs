@@ -93,6 +93,9 @@ enum EndpointIdentity {
     Manual { host: String, port: u16 },
     /// A microcontroller running the Slint viewer firmware.
     Serial(SerialIdentity),
+    /// A serial port the user entered by path, such as the pseudo-terminal of the
+    /// `mcu-viewer` simulator, which gets another one on every start.
+    SerialPath { path: String },
 }
 
 /// Identifies a device on a serial port, whichever port it's on.
@@ -199,6 +202,13 @@ impl Springboard {
                 let _ = probe_handle.task_sender.send(Box::new(move |task| {
                     task.manual_probe = ManualProbe::start(host, port);
                     task.update_ui();
+                }));
+            });
+            let serial_path_handle = handle.clone();
+            global.on_connect_serial_path(move |path| {
+                let path = path.trim().to_owned();
+                let _ = serial_path_handle.task_sender.send(Box::new(move |task| {
+                    task.select_endpoint(EndpointIdentity::SerialPath { path })
                 }));
             });
             global.on_submit_pairing_code(move |code| {
@@ -431,6 +441,9 @@ impl SpringboardTask {
                 let Some(port) = self.usb_port(identity) else { return };
                 self.connection = Connection::serial(port.name.clone());
             }
+            EndpointIdentity::SerialPath { path } => {
+                self.connection = Connection::serial(path.clone());
+            }
         }
     }
 
@@ -610,7 +623,6 @@ impl SpringboardTask {
                 Some(_) => Default::default(),
                 None => "Device isn't connected".into(),
             },
-            plugged_in: port.is_some(),
             saved: !self.is_unsaved(&EndpointIdentity::Serial(identity.clone())),
             ..Default::default()
         }
@@ -664,6 +676,13 @@ impl SpringboardTask {
                 ..Default::default()
             },
             EndpointIdentity::Serial(identity) => self.serial_row(identity),
+            // Never disabled, as a manual endpoint
+            EndpointIdentity::SerialPath { path } => ui::PreviewEndpoint {
+                name: path.into(),
+                kind: ui::PreviewEndpointKind::Serial,
+                address: path.into(),
+                ..Default::default()
+            },
         }
     }
 
@@ -2293,8 +2312,7 @@ mod tests {
                 controller.start();
                 wait_condition(&controller, |task| {
                     let row = task.serial_row(&paired_usb_viewer());
-                    !row.plugged_in
-                        && row.unavailable_reason == "Device isn't connected"
+                    row.unavailable_reason == "Device isn't connected"
                         && !task.connection.is_started()
                 })
                 .await;
@@ -2302,10 +2320,36 @@ mod tests {
                 wait_condition(&controller, |task| {
                     let row = task.serial_row(&paired_usb_viewer());
                     row.name == "m5stack-cores3"
-                        && row.plugged_in
+                        && row.address == "/dev/no-such-port-2"
                         && row.saved
                         && task.connection.state == ui::ConnectionState::Failed
                         && task.connection.error.starts_with("Cannot open /dev/no-such-port-2")
+                })
+                .await;
+                controller.close();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_serial_path_is_saved_only_once_it_connects() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (controller, _upstream, _discovered, _usb) = controller("echo_child");
+                reply_settings(&controller, Vec::new(), EndpointIdentity::Local);
+                controller.start();
+                controller
+                    .task_sender
+                    .send(Box::new(|task| {
+                        task.select_endpoint(EndpointIdentity::SerialPath {
+                            path: "/dev/no-such-pty".into(),
+                        })
+                    }))
+                    .unwrap();
+                wait_condition(&controller, |task| {
+                    task.connection.state == ui::ConnectionState::Failed
+                        && task.connection.error.starts_with("Cannot open /dev/no-such-pty")
+                        && task.saved_endpoints.is_empty()
                 })
                 .await;
                 controller.close();
