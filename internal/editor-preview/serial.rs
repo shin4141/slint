@@ -32,7 +32,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 /// How long a device may take to answer the handshake: the viewer firmware answers between
 /// two frames, so a port that stays silent longer doesn't run it.
-const READY_TIMEOUT: Duration = Duration::from_secs(2);
+const READY_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a device may take to show a design.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a write may wait for the device to read, which it does between its other work.
@@ -143,9 +143,8 @@ impl UsbSerialPort {
 pub const SERIAL_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The USB serial ports of this computer.
-pub fn usb_serial_ports() -> Vec<UsbSerialPort> {
-    serialport::available_ports()
-        .unwrap_or_default()
+pub fn usb_serial_ports() -> Result<Vec<UsbSerialPort>, serialport::Error> {
+    Ok(serialport::available_ports()?
         .into_iter()
         .filter_map(|port| match port.port_type {
             serialport::SerialPortType::UsbPort(usb) => Some(UsbSerialPort {
@@ -160,7 +159,7 @@ pub fn usb_serial_ports() -> Vec<UsbSerialPort> {
             }),
             _ => None,
         })
-        .collect()
+        .collect())
 }
 
 fn open_port(name: &str) -> Result<Box<dyn serialport::SerialPort>, String> {
@@ -629,7 +628,8 @@ fn handshake(
         .map_err(|err| format!("Cannot write to the port: {err}"))?;
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
-        // A device that keeps logging would otherwise keep a queued input ready past the deadline
+        // `recv_timeout` returns a queued input even with no time left,
+        // and a device that keeps logging always has one
         let input = match deadline.checked_duration_since(Instant::now()) {
             Some(left) => inputs.recv_timeout(left),
             None => Err(mpsc::RecvTimeoutError::Timeout),

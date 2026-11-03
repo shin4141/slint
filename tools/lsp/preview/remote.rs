@@ -383,7 +383,7 @@ fn browse_loop(
 #[cfg(feature = "preview-serial")]
 fn serial_scan_loop(api: slint::Weak<Api<'static>>, stop_flag: Arc<AtomicBool>) {
     while !stop_flag.load(Ordering::Relaxed) {
-        let ports = editor_preview::serial::usb_serial_ports();
+        let ports = editor_preview::serial::usb_serial_ports().unwrap_or_default();
         let api = api.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(api) = api.upgrade() {

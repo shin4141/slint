@@ -28,6 +28,7 @@ enum ActivePreview {
     Serial {
         connection: SerialConnection,
         events: mpsc::UnboundedReceiver<SerialEvent>,
+        board: Option<String>,
     },
 }
 
@@ -74,13 +75,21 @@ impl Connection {
         let (connection, events) = SerialConnection::connect(port, None);
         Self {
             state: ui::ConnectionState::Connecting,
-            preview: Some(ActivePreview::Serial { connection, events }),
+            preview: Some(ActivePreview::Serial { connection, events, board: None }),
             ..Default::default()
         }
     }
 
     pub(super) fn is_started(&self) -> bool {
         self.preview.is_some()
+    }
+
+    /// The board a connected serial viewer's firmware reports.
+    pub(super) fn serial_board(&self) -> Option<&str> {
+        match &self.preview {
+            Some(ActivePreview::Serial { board, .. }) => board.as_deref(),
+            _ => None,
+        }
     }
 
     /// Pending while nothing is started. `None` when the preview went away.
@@ -90,11 +99,16 @@ impl Connection {
             Some(ActivePreview::Local { receiver, .. }) => {
                 receiver.recv().await.map(ConnectionEvent::Message)
             }
-            Some(ActivePreview::Serial { events, .. }) => Some(match events.recv().await? {
-                SerialEvent::Connected { problem, .. } => ConnectionEvent::Connected { problem },
-                SerialEvent::Failed(error) => ConnectionEvent::Ended { error: Some(error) },
-                SerialEvent::Message(message) => ConnectionEvent::Message(message),
-            }),
+            Some(ActivePreview::Serial { events, board, .. }) => {
+                Some(match events.recv().await? {
+                    SerialEvent::Connected { problem, board: reported } => {
+                        *board = Some(reported);
+                        ConnectionEvent::Connected { problem }
+                    }
+                    SerialEvent::Failed(error) => ConnectionEvent::Ended { error: Some(error) },
+                    SerialEvent::Message(message) => ConnectionEvent::Message(message),
+                })
+            }
             None => std::future::pending().await,
         }
     }

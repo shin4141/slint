@@ -18,6 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{
     LspToPreview,
     remote_authentication::{PairingAnswer, PairingCredentials},
+    serial::UsbSerialPort,
     springboard_ui as ui,
 };
 
@@ -90,15 +91,15 @@ enum EndpointIdentity {
     /// a reserved default port would also cover mobile viewers, which take no flags.
     // TODO: add an optional name the user gives it.
     Manual { host: String, port: u16 },
-    /// A microcontroller running the Slint viewer firmware, saved once it's plugged in.
+    /// A microcontroller running the Slint viewer firmware.
     Serial(SerialIdentity),
 }
 
 /// Identifies a device on a serial port, whichever port it's on.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct SerialIdentity {
-    /// The board, as the firmware names it.
-    name: String,
+    /// The board, as the firmware names it. `None` until it's paired.
+    name: Option<String>,
     /// See `UsbSerialPort::hardware_id`.
     hardware_id: String,
 }
@@ -119,8 +120,7 @@ struct SpringboardTask {
     manual_probe: Option<ManualProbe>,
     credentials: HashMap<EndpointIdentity, PairingCredentials>,
     usb_discovery: UsbDiscovery,
-    /// The plugged-in devices with the viewer firmware, and their port names.
-    usb_endpoints: Vec<(SerialIdentity, String)>,
+    usb_ports: Vec<UsbSerialPort>,
 }
 
 impl Springboard {
@@ -224,7 +224,7 @@ impl Springboard {
             manual_probe: None,
             credentials: HashMap::new(),
             usb_discovery,
-            usb_endpoints: Vec::new(),
+            usb_ports: Vec::new(),
         };
         task.request_settings();
         task.update_ui();
@@ -299,9 +299,8 @@ impl SpringboardTask {
                         }
                     }
                 }
-                endpoints = self.usb_discovery.get_endpoints() => {
-                    self.usb_endpoints = endpoints;
-                    self.save_usb_endpoints();
+                ports = self.usb_discovery.get_ports() => {
+                    self.usb_ports = ports;
                     self.connect();
                     self.update_ui();
                 }
@@ -354,7 +353,7 @@ impl SpringboardTask {
     /// What clicking Pair on row `index` of `discovered-endpoints` does.
     #[cfg(test)]
     fn pair(&mut self, index: usize) {
-        if let Some(identity) = self.discovery.discovered.get(index).map(RemoteViewer::identity) {
+        if let Some((identity, _)) = self.discovered_rows().into_iter().nth(index) {
             self.select_endpoint(identity);
         }
     }
@@ -430,7 +429,7 @@ impl SpringboardTask {
             }
             EndpointIdentity::Serial(identity) => {
                 let Some(port) = self.usb_port(identity) else { return };
-                self.connection = Connection::serial(port.to_owned());
+                self.connection = Connection::serial(port.name.clone());
             }
         }
     }
@@ -456,6 +455,11 @@ impl SpringboardTask {
             ConnectionEvent::Connected { problem } => {
                 self.connection.connected();
                 self.connection.error = problem.unwrap_or_default();
+                if let EndpointIdentity::Serial(identity @ SerialIdentity { name: None, .. }) =
+                    &mut self.selected_endpoint
+                {
+                    identity.name = self.connection.serial_board().map(str::to_owned);
+                }
                 if self.is_unsaved(&self.selected_endpoint) {
                     self.saved_endpoints.push(self.selected_endpoint.clone());
                     self.store_settings();
@@ -557,8 +561,6 @@ impl SpringboardTask {
         let Some(settings) = SpringboardSettings::deserialize(contents) else { return };
         self.saved_endpoints = settings.saved;
         self.selected_endpoint = settings.selected;
-        // Devices plugged in before the settings arrived
-        self.save_usb_endpoints();
         self.update_ui();
         // Only a hand-edited settings file selects an endpoint it doesn't save.
         if self.is_unsaved(&self.selected_endpoint) {
@@ -578,39 +580,55 @@ impl SpringboardTask {
         }
     }
 
-    /// The port name of the plugged-in device `identity`.
-    fn usb_port(&self, identity: &SerialIdentity) -> Option<&str> {
-        let (_, port) = self.usb_endpoints.iter().find(|(endpoint, _)| endpoint == identity)?;
-        Some(port)
+    /// The port the device `identity` is plugged into.
+    fn usb_port(&self, identity: &SerialIdentity) -> Option<&UsbSerialPort> {
+        self.usb_ports.iter().find(|port| port.hardware_id() == identity.hardware_id)
     }
 
-    /// Saves the plugged-in devices that aren't saved yet.
-    fn save_usb_endpoints(&mut self) {
-        let unsaved: Vec<_> = self
-            .usb_endpoints
+    /// The saved identity of the device on `port`, or an unpaired one.
+    fn usb_identity(&self, port: &UsbSerialPort) -> SerialIdentity {
+        let hardware_id = port.hardware_id();
+        self.saved_endpoints
             .iter()
-            .map(|(identity, _)| EndpointIdentity::Serial(identity.clone()))
-            .filter(|identity| self.is_unsaved(identity))
-            .collect();
-        if !unsaved.is_empty() {
-            self.saved_endpoints.extend(unsaved);
-            self.store_settings();
-        }
+            .find_map(|saved| match saved {
+                EndpointIdentity::Serial(identity) if identity.hardware_id == hardware_id => {
+                    Some(identity.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or(SerialIdentity { name: None, hardware_id })
     }
 
     fn serial_row(&self, identity: &SerialIdentity) -> ui::PreviewEndpoint {
         let port = self.usb_port(identity);
+        let name = identity.name.as_deref().or(port.map(|port| port.product.as_str()));
         ui::PreviewEndpoint {
-            name: identity.name.as_str().into(),
+            name: name.unwrap_or_default().into(),
             kind: ui::PreviewEndpointKind::Serial,
-            address: port.unwrap_or_default().into(),
+            address: port.map(|port| port.name.as_str()).unwrap_or_default().into(),
             unavailable_reason: match port {
                 Some(_) => Default::default(),
                 None => "Device isn't connected".into(),
             },
             plugged_in: port.is_some(),
+            saved: !self.is_unsaved(&EndpointIdentity::Serial(identity.clone())),
             ..Default::default()
         }
+    }
+
+    /// The rows of `discovered-endpoints`: the nearby viewers, then the USB ports.
+    fn discovered_rows(&self) -> Vec<(EndpointIdentity, ui::PreviewEndpoint)> {
+        let viewers = self
+            .discovery
+            .discovered
+            .iter()
+            .map(|viewer| (viewer.identity(), self.discovered_row(viewer)));
+        let ports = self.usb_ports.iter().map(|port| {
+            let identity = self.usb_identity(port);
+            let row = self.serial_row(&identity);
+            (EndpointIdentity::Serial(identity), row)
+        });
+        viewers.chain(ports).collect()
     }
 
     fn saved_row(&self, identity: &EndpointIdentity) -> ui::PreviewEndpoint {
@@ -654,10 +672,8 @@ impl SpringboardTask {
             .chain(self.saved_endpoints.iter().cloned())
             .collect();
         let saved_rows: Vec<_> = saved.iter().map(|identity| self.saved_row(identity)).collect();
-        let discovered: Vec<_> =
-            self.discovery.discovered.iter().map(RemoteViewer::identity).collect();
-        let discovered_rows: Vec<_> =
-            self.discovery.discovered.iter().map(|viewer| self.discovered_row(viewer)).collect();
+        let (discovered, discovered_rows): (Vec<_>, Vec<_>) =
+            self.discovered_rows().into_iter().unzip();
         let selected =
             saved.iter().position(|row| row == &self.selected_endpoint).map_or(-1, |i| i as i32);
         let selected_row = self.saved_row(&self.selected_endpoint);
@@ -708,12 +724,12 @@ mod tests {
         Springboard,
         mpsc::UnboundedReceiver<PreviewToLspMessage>,
         flume::Sender<mdns_sd::ServiceEvent>,
-        mpsc::UnboundedSender<Vec<(SerialIdentity, String)>>,
+        tokio::sync::watch::Sender<Vec<UsbSerialPort>>,
     ) {
         let (executable, arguments) = fixture_config(name);
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let (discovered, discovery_receiver) = flume::unbounded();
-        let (usb_endpoints, usb_receiver) = mpsc::unbounded_channel();
+        let (usb_ports, usb_receiver) = tokio::sync::watch::channel(Vec::new());
         let controller = Springboard::spawn(
             LocalPreviewConfig { executable, arguments, prepare_arguments: None, on_started: None },
             sender,
@@ -726,7 +742,7 @@ mod tests {
                 if settings == [SPRINGBOARD_SETTINGS_FILE.to_string()] => {}
             other => panic!("Expected a request for the user settings, got {other:?}"),
         }
-        (controller, receiver, discovered, usb_endpoints)
+        (controller, receiver, discovered, usb_ports)
     }
 
     fn select_saved(controller: &Springboard, index: usize) {
@@ -2217,69 +2233,79 @@ mod tests {
             .await;
     }
 
-    fn usb_viewer() -> SerialIdentity {
+    fn usb_port(name: &str) -> UsbSerialPort {
+        UsbSerialPort {
+            name: name.into(),
+            product: "USB serial device".into(),
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("30:ED:A0:D4:C2:A8".into()),
+        }
+    }
+
+    fn paired_usb_viewer() -> SerialIdentity {
         SerialIdentity {
-            name: "M5Stack CoreS3".into(),
+            name: Some("m5stack-cores3".into()),
             hardware_id: "303a:1001:30:ED:A0:D4:C2:A8".into(),
         }
     }
 
     #[tokio::test]
-    async fn a_usb_viewer_is_saved_and_kept_until_unplugged() {
+    async fn a_usb_port_is_opened_only_once_paired() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (controller, _upstream, _discovered, usb) = controller("echo_child");
-                reply_settings(&controller, vec![remote("Phone")], EndpointIdentity::Local);
-                usb.send(vec![(usb_viewer(), "/dev/ttyACM0".into())]).unwrap();
-                let saved = vec![remote("Phone"), EndpointIdentity::Serial(usb_viewer())];
-                wait_condition(&controller, move |task| {
-                    let row = task.serial_row(&usb_viewer());
-                    task.saved_endpoints == saved && row.plugged_in && row.address == "/dev/ttyACM0"
-                })
-                .await;
-                usb.send(Vec::new()).unwrap();
+                reply_settings(&controller, Vec::new(), EndpointIdentity::Local);
+                usb.send(vec![usb_port("/dev/no-such-port-1")]).unwrap();
                 wait_condition(&controller, |task| {
-                    let row = task.serial_row(&usb_viewer());
-                    task.saved_endpoints.len() == 2
-                        && !row.plugged_in
-                        && row.unavailable_reason == "Device isn't connected"
+                    let rows = task.discovered_rows();
+                    let [(EndpointIdentity::Serial(SerialIdentity { name: None, .. }), row)] =
+                        rows.as_slice()
+                    else {
+                        return false;
+                    };
+                    row.name == "USB serial device"
+                        && row.address == "/dev/no-such-port-1"
+                        && !row.saved
+                        && !task.connection.is_started()
                 })
                 .await;
-                controller.close();
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn a_usb_viewer_found_before_the_settings_arrive_stays_saved() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (controller, _upstream, _discovered, usb) = controller("echo_child");
-                usb.send(vec![(usb_viewer(), "/dev/ttyACM0".into())]).unwrap();
-                wait_condition(&controller, |task| {
-                    task.saved_endpoints == [EndpointIdentity::Serial(usb_viewer())]
-                })
-                .await;
-                reply_settings(&controller, vec![remote("Phone")], EndpointIdentity::Local);
-                let saved = vec![remote("Phone"), EndpointIdentity::Serial(usb_viewer())];
-                wait_condition(&controller, move |task| task.saved_endpoints == saved).await;
-                controller.close();
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn a_saved_usb_viewer_is_opened_on_its_current_port() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (controller, _upstream, _discovered, usb) = controller("echo_child");
-                let identity = EndpointIdentity::Serial(usb_viewer());
-                reply_settings(&controller, vec![identity.clone()], identity);
                 controller.start();
-                usb.send(vec![(usb_viewer(), "/dev/no-such-port-1".into())]).unwrap();
+                pair(&controller, 0);
                 wait_condition(&controller, |task| {
                     task.connection.state == ui::ConnectionState::Failed
                         && task.connection.error.starts_with("Cannot open /dev/no-such-port-1")
+                        && task.saved_endpoints.is_empty()
+                })
+                .await;
+                controller.close();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_paired_usb_viewer_is_opened_on_its_current_port() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (controller, _upstream, _discovered, usb) = controller("echo_child");
+                let identity = EndpointIdentity::Serial(paired_usb_viewer());
+                reply_settings(&controller, vec![identity.clone()], identity);
+                controller.start();
+                wait_condition(&controller, |task| {
+                    let row = task.serial_row(&paired_usb_viewer());
+                    !row.plugged_in
+                        && row.unavailable_reason == "Device isn't connected"
+                        && !task.connection.is_started()
+                })
+                .await;
+                usb.send(vec![usb_port("/dev/no-such-port-2")]).unwrap();
+                wait_condition(&controller, |task| {
+                    let row = task.serial_row(&paired_usb_viewer());
+                    row.name == "m5stack-cores3"
+                        && row.plugged_in
+                        && row.saved
+                        && task.connection.state == ui::ConnectionState::Failed
+                        && task.connection.error.starts_with("Cannot open /dev/no-such-port-2")
                 })
                 .await;
                 controller.close();

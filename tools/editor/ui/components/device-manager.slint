@@ -3,7 +3,7 @@
 
 import { EditorInput } from "editor-input.slint";
 import { ButtonBase } from "../../controls/src/headless.slint";
-import { Springboard, ConnectionState, ManualEndpointState } from "@springboard";
+import { Springboard, ConnectionState, ManualEndpointState, PreviewEndpointKind } from "@springboard";
 import { Preview } from "../preview.slint";
 import { ViewerStyle, Chevron, ViewerIcon } from "viewer-style.slint";
 import { EditorScrollView } from "editor-scroll-view.slint";
@@ -63,6 +63,7 @@ export component DeviceManager inherits Rectangle {
     private property <bool> pairing-required: Springboard.connection.state == ConnectionState.PairingRequired
         || Springboard.connection.state == ConnectionState.UnpairedConfirmationRequired;
     private property <bool> connected: Springboard.connection.state == ConnectionState.Connected;
+    private property <bool> serial: Springboard.selected-endpoint.kind == PreviewEndpointKind.Serial;
     init => {
         root.page = root.pairing-required ? 3 : 0;
         Springboard.discover-devices();
@@ -101,7 +102,7 @@ export component DeviceManager inherits Rectangle {
     }
     Text {
         x: root.page == 0 ? (24px * ViewerStyle.scale) : (58px * ViewerStyle.scale); y: (23px * ViewerStyle.scale);
-        text: root.page == 0 ? @tr("Devices") : root.page == 1 ? @tr("Pair nearby device") : root.page == 2 ? @tr("Enter IP address") : @tr("Pair device");
+        text: root.page == 0 ? @tr("Devices") : root.page == 1 ? @tr("Pair a device") : root.page == 2 ? @tr("Enter IP address") : @tr("Pair device");
         color: ViewerStyle.ink; font-size: (21px * ViewerStyle.scale); font-weight: 600;
     }
     close := DeviceAction {
@@ -152,15 +153,15 @@ export component DeviceManager inherits Rectangle {
         }
         SoftButton {
             x: (24px * ViewerStyle.scale); y: (344px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); height: (46px * ViewerStyle.scale);
-            label: @tr("Pair nearby device"); primary: true;
+            label: @tr("Pair a device"); primary: true;
             activated => { root.page = 1; Springboard.discover-devices(); }
         }
     }
 
     if root.page == 1: Rectangle {
-        Text { x: (24px * ViewerStyle.scale); y: (64px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: @tr("Open Slint Preview on your phone or tablet.\nUse the same Wi-Fi network as this computer."); color: ViewerStyle.muted; font-size: (14px * ViewerStyle.scale); wrap: word-wrap; }
+        Text { x: (24px * ViewerStyle.scale); y: (64px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: @tr("Open Slint Preview on your phone or tablet on the same Wi-Fi,\nor connect a microcontroller flashed with it over USB."); color: ViewerStyle.muted; font-size: (14px * ViewerStyle.scale); wrap: word-wrap; }
         Rectangle { x: (25px * ViewerStyle.scale); y: (117px * ViewerStyle.scale); width: (6px * ViewerStyle.scale); height: (6px * ViewerStyle.scale); border-radius: (3px * ViewerStyle.scale); background: ViewerStyle.connected; }
-        Text { x: (40px * ViewerStyle.scale); y: (112px * ViewerStyle.scale); text: @tr("Looking for nearby viewers"); color: ViewerStyle.muted; font-size: 11px; }
+        Text { x: (40px * ViewerStyle.scale); y: (112px * ViewerStyle.scale); text: @tr("Looking for viewers"); color: ViewerStyle.muted; font-size: 11px; }
         Rectangle {
             x: (16px * ViewerStyle.scale); y: (138px * ViewerStyle.scale); width: parent.width - (32px * ViewerStyle.scale); height: (184px * ViewerStyle.scale);
             border-radius: (11px * ViewerStyle.scale); border-width: (1px * ViewerStyle.scale); border-color: ViewerStyle.field-border; background: ViewerStyle.field;
@@ -198,7 +199,7 @@ export component DeviceManager inherits Rectangle {
                 }
             }
         }
-        Text { x: (24px * ViewerStyle.scale); y: (336px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: @tr("Don't see your device?"); color: ViewerStyle.ink; font-size: (14px * ViewerStyle.scale); }
+        Text { x: (24px * ViewerStyle.scale); y: (336px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: @tr("Don't see your remote device?"); color: ViewerStyle.ink; font-size: (14px * ViewerStyle.scale); }
         manual-fallback := DeviceAction {
             x: (16px * ViewerStyle.scale); y: (360px * ViewerStyle.scale); width: parent.width - (32px * ViewerStyle.scale); height: (30px * ViewerStyle.scale); label: @tr("Enter IP address...");
             activated => { root.page = 2; }
@@ -253,10 +254,10 @@ export component DeviceManager inherits Rectangle {
         }
         Text { x: (91px * ViewerStyle.scale); y: (85px * ViewerStyle.scale); width: parent.width - (115px * ViewerStyle.scale); text: Springboard.selected-endpoint.name; color: ViewerStyle.ink; font-size: (17px * ViewerStyle.scale); font-weight: 500; overflow: elide; }
         Text { x: (91px * ViewerStyle.scale); y: (112px * ViewerStyle.scale); text: Springboard.selected-endpoint.address; color: ViewerStyle.muted; font-size: 11px; }
-        Text { x: (24px * ViewerStyle.scale); y: (166px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: Springboard.connection.state == ConnectionState.UnpairedConfirmationRequired ? @tr("This viewer does not encrypt its connection.") : Springboard.connection.state == ConnectionState.Connecting ? @tr("Connecting to your viewer…") : @tr("Enter the code shown on your device."); color: ViewerStyle.muted; font-size: (15px * ViewerStyle.scale); }
+        Text { x: (24px * ViewerStyle.scale); y: (166px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: Springboard.connection.state == ConnectionState.UnpairedConfirmationRequired ? @tr("This viewer does not encrypt its connection.") : Springboard.connection.state == ConnectionState.Connecting ? @tr("Connecting to your viewer…") : root.serial ? @tr("Couldn’t connect to this device.") : @tr("Enter the code shown on your device."); color: ViewerStyle.muted; font-size: (15px * ViewerStyle.scale); }
         if Springboard.connection.state == ConnectionState.PairingRequired: DeviceField { x: (24px * ViewerStyle.scale); y: (204px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text <=> root.code; placeholder: @tr("{}-digit pairing code", Springboard.connection.pairing-code-length); numeric: true; }
         Text { x: (24px * ViewerStyle.scale); y: (274px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: Springboard.connection.error; wrap: word-wrap; color: ViewerStyle.error; font-size: 11px; }
-        SoftButton {
+        if !root.serial: SoftButton {
             x: (24px * ViewerStyle.scale); y: (315px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); height: (46px * ViewerStyle.scale); label: Springboard.connection.state == ConnectionState.UnpairedConfirmationRequired ? @tr("Connect unencrypted") : @tr("Pair device"); primary: true; enabled: Springboard.connection.state == ConnectionState.UnpairedConfirmationRequired || (Springboard.connection.state == ConnectionState.PairingRequired && root.code.character-count == Springboard.connection.pairing-code-length);
             activated => {
                 if Springboard.connection.state == ConnectionState.UnpairedConfirmationRequired {
@@ -264,7 +265,7 @@ export component DeviceManager inherits Rectangle {
                 } else { Springboard.submit-pairing-code(root.code); root.code = ""; }
             }
         }
-        Text { x: (24px * ViewerStyle.scale); y: (385px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: @tr("A restart may require a new pairing code."); color: ViewerStyle.muted; font-size: 11px; horizontal-alignment: center; }
+        if !root.serial: Text { x: (24px * ViewerStyle.scale); y: (385px * ViewerStyle.scale); width: parent.width - (48px * ViewerStyle.scale); text: @tr("A restart may require a new pairing code."); color: ViewerStyle.muted; font-size: 11px; horizontal-alignment: center; }
     }
     if root.removing >= 0: Rectangle {
         TouchArea { clicked => { root.removing = -1; } }

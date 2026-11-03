@@ -1,18 +1,14 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use std::collections::HashMap;
-
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 use i_slint_live_preview::protocol::{
     PROTOCOL_SUBPROTOCOL, SERVICE_TYPE, SLINT_VERSION, TXT_PROTOCOLS_KEY, TXT_SLINT_VERSION_KEY,
 };
 
-use super::{EndpointIdentity, SerialIdentity};
-use crate::serial::{
-    SERIAL_SCAN_INTERVAL, SerialConnection, SerialEvent, UsbSerialPort, usb_serial_ports,
-};
+use super::EndpointIdentity;
+use crate::serial::{SERIAL_SCAN_INTERVAL, UsbSerialPort, usb_serial_ports};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RemoteViewer {
@@ -265,26 +261,24 @@ impl DiscoveredViewers {
     }
 }
 
-/// Finds the USB devices with the Slint viewer firmware of this Slint version, until it's
-/// dropped.
+/// Lists the USB serial ports, until it's dropped.
+/// Only listing, never opening them: opening a port disturbs the device behind it.
 pub(super) struct UsbDiscovery {
-    receiver: mpsc::UnboundedReceiver<Vec<(SerialIdentity, String)>>,
+    receiver: watch::Receiver<Vec<UsbSerialPort>>,
 }
 
 impl UsbDiscovery {
     pub(super) fn start() -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = watch::channel(Vec::new());
         crate::spawn_local(async move {
-            // By port name, `None` if no viewer answered. A port is probed again only once
-            // it's unplugged, so a port that didn't open, such as without permission or
-            // while `idf.py monitor` holds it, stays hidden until then.
-            let mut probed = HashMap::new();
-            let mut sent = Vec::new();
             while !sender.is_closed() {
-                let endpoints = Self::scan(&mut probed).await;
-                if endpoints != sent {
-                    let _ = sender.send(endpoints.clone());
-                    sent = endpoints;
+                // Listing the ports blocks, for long on Windows
+                if let Ok(Ok(ports)) = tokio::task::spawn_blocking(usb_serial_ports).await {
+                    sender.send_if_modified(|current| {
+                        let changed = *current != ports;
+                        *current = ports;
+                        changed
+                    });
                 }
                 tokio::time::sleep(SERIAL_SCAN_INTERVAL).await;
             }
@@ -292,72 +286,16 @@ impl UsbDiscovery {
         Self { receiver }
     }
 
-    /// Waits until the plugged-in devices change, and returns them with their port names.
-    pub(super) async fn get_endpoints(&mut self) -> Vec<(SerialIdentity, String)> {
-        match self.receiver.recv().await {
-            Some(endpoints) => endpoints,
-            None => std::future::pending().await,
+    /// Waits until the plugged-in ports change, and returns them.
+    pub(super) async fn get_ports(&mut self) -> Vec<UsbSerialPort> {
+        match self.receiver.changed().await {
+            Ok(()) => self.receiver.borrow_and_update().clone(),
+            Err(_) => std::future::pending().await,
         }
-    }
-
-    /// Lists the ports, and probes those that aren't in `probed` yet.
-    // TODO: this generated code may need a refactor; keep it isolated in here meanwhile.
-    async fn scan(
-        probed: &mut HashMap<String, Option<SerialIdentity>>,
-    ) -> Vec<(SerialIdentity, String)> {
-        // Espressif. Only its ports are probed, since opening a port can reset the device behind it.
-        const VIEWER_USB_VENDORS: &[u16] = &[0x303a];
-        // Listing the ports blocks, for long on Windows
-        let ports = tokio::task::spawn_blocking(usb_serial_ports).await.unwrap_or_default();
-        probed.retain(|name, _| ports.iter().any(|port| &port.name == name));
-        let new_ports: Vec<_> = ports
-            .into_iter()
-            .filter(|port| {
-                VIEWER_USB_VENDORS.contains(&port.vid) && !probed.contains_key(&port.name)
-            })
-            .collect();
-        // Concurrently, so that a port that doesn't answer doesn't delay the others
-        let identities = futures_util::future::join_all(new_ports.iter().map(Self::probe)).await;
-        for (port, identity) in new_ports.into_iter().zip(identities) {
-            probed.insert(port.name, identity);
-        }
-        let mut endpoints: Vec<_> = probed
-            .iter()
-            .filter_map(|(name, identity)| Some((identity.clone()?, name.clone())))
-            .collect();
-        endpoints.sort_by(|a, b| a.1.cmp(&b.1));
-        endpoints
-    }
-
-    /// Connects to `port`, and identifies the device if the viewer firmware answers.
-    async fn probe(port: &UsbSerialPort) -> Option<SerialIdentity> {
-        // Also bounds a device that keeps the session busy, such as by logging without pause
-        const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-        let (connection, mut events) = SerialConnection::connect(port.name.clone(), None);
-        let board = tokio::time::timeout(PROBE_TIMEOUT, async {
-            loop {
-                match events.recv().await? {
-                    SerialEvent::Connected { board, .. } => return Some(board),
-                    SerialEvent::Failed(_) => return None,
-                    SerialEvent::Message(_) => {}
-                }
-            }
-        })
-        .await
-        .ok()
-        .flatten();
-        drop(connection);
-        // The session releases the port when it ends, which closes `events`
-        let _ =
-            tokio::time::timeout(PROBE_TIMEOUT, async { while events.recv().await.is_some() {} })
-                .await;
-        Some(SerialIdentity { name: board?, hardware_id: port.hardware_id() })
     }
 
     #[cfg(test)]
-    pub(super) fn from_receiver(
-        receiver: mpsc::UnboundedReceiver<Vec<(SerialIdentity, String)>>,
-    ) -> Self {
+    pub(super) fn from_receiver(receiver: watch::Receiver<Vec<UsbSerialPort>>) -> Self {
         Self { receiver }
     }
 }
