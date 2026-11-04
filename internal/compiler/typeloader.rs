@@ -1006,11 +1006,34 @@ struct LibraryProject {
     library_paths: HashMap<String, PathBuf>,
 }
 
+impl LibraryProject {
+    /// Compares the paths as text, since `file` may come from an editor URL.
+    fn is_main(&self, file: &SourcePath) -> bool {
+        self.main.as_ref().is_some_and(|main| main.to_string() == file.to_string())
+    }
+}
+
 /// The settings for the files of the application, or of a library with a project file.
 struct ProjectSettings<'a> {
     edition: Option<crate::project_file::SlintEdition>,
     include_paths: &'a [PathBuf],
     library_paths: &'a HashMap<String, PathBuf>,
+}
+
+/// Makes the project roots and the library project files of `compiler_config` absolute, like the
+/// path of a changed file that an editor passes to `TypeLoader::drop_document`.
+fn make_project_paths_absolute(compiler_config: &mut CompilerConfiguration) {
+    let absolute = |path| crate::project_file::normalize_project_file_path(path);
+    for path in compiler_config.library_paths.values_mut() {
+        if crate::project_file::is_project_file(path)
+            && let Some(absolute) = absolute(SourcePath::new(&*path)).into_native_path()
+        {
+            *path = absolute;
+        }
+    }
+    for root in &mut compiler_config.project_roots {
+        *root = absolute(root.clone());
+    }
 }
 
 /// Returns whether `file` is in the directory `root`, or below it.
@@ -1052,18 +1075,7 @@ struct BorrowedTypeLoader<'a> {
 
 impl TypeLoader {
     pub fn new(mut compiler_config: CompilerConfiguration, diag: &mut BuildDiagnostics) -> Self {
-        // Absolute, like the path of a changed file that an editor passes to `drop_document`
-        let absolute = |path| crate::project_file::normalize_project_file_path(path);
-        for path in compiler_config.library_paths.values_mut() {
-            if crate::project_file::is_project_file(path)
-                && let Some(absolute) = absolute(SourcePath::new(&*path)).into_native_path()
-            {
-                *path = absolute;
-            }
-        }
-        for root in &mut compiler_config.project_roots {
-            *root = absolute(root.clone());
-        }
+        make_project_paths_absolute(&mut compiler_config);
         let mut style = compiler_config.style.clone().unwrap_or_else(|| "fluent".into());
 
         if style == "native" {
@@ -1104,6 +1116,14 @@ impl TypeLoader {
         }
 
         myself
+    }
+
+    /// Replaces the compiler configuration, and forgets the library projects of the previous one.
+    /// The documents need to be invalidated too.
+    pub fn set_compiler_config(&mut self, mut compiler_config: CompilerConfiguration) {
+        make_project_paths_absolute(&mut compiler_config);
+        self.compiler_config = compiler_config;
+        self.library_projects.clear();
     }
 
     fn bump_revision(&mut self) {
@@ -1212,6 +1232,7 @@ impl TypeLoader {
         let mut imports = Vec::new();
         let mut dependencies_futures = Vec::new();
         for mut import in Self::collect_dependencies(state, doc) {
+            Self::use_library_project(state, &import);
             let error = state.borrow().tl.library_import_error(
                 Some(import.import_uri_token.source_file.path()),
                 &import.file,
@@ -1220,7 +1241,6 @@ impl TypeLoader {
                 state.borrow_mut().diag.push_error(error, &import.import_uri_token);
                 continue;
             }
-            Self::use_library_project(state, &import);
             // The embedded files import each other by that path, so only a
             // document outside them is rejected.
             if SourcePath::new(&import.file).is_builtin()
@@ -1756,7 +1776,7 @@ impl TypeLoader {
         }
         if file.is_some() {
             return Some(format!(
-                "\"{import}\" is inside a library with a project file, where only what the main file exports is public. Use what \"@{library}\" exports instead"
+                "Use what \"@{library}\" exports instead: \"{import}\" is private to a library with a project file"
             ));
         }
         let project = self.library_project(path)?;
@@ -1776,7 +1796,8 @@ impl TypeLoader {
         libraries
             .chain(applications)
             .filter(|(root, _)| is_within(root, file))
-            .max_by_key(|(root, _)| root.to_string().len())
+            // An application root in the same directory is the library's own project file
+            .max_by_key(|(root, project)| (root.to_string().len(), project.is_some()))
             .and_then(|(_, project)| project)
     }
 
@@ -1806,11 +1827,20 @@ impl TypeLoader {
     }
 
     /// The edition of the component that declares `element`, which inlining doesn't change.
+    /// An element that a pass created takes the edition of its component.
     pub fn edition_of_element(
         &self,
         element: &object_tree::Element,
     ) -> Option<crate::project_file::SlintEdition> {
-        self.edition_of(element.source_file().map(|file| file.path()))
+        let file = element.source_file().map(|file| file.path().clone()).or_else(|| {
+            let component = element.enclosing_component.upgrade()?;
+            if let Some(node) = &component.node {
+                return Some(node.source_file.path().clone());
+            }
+            let root = component.root_element.try_borrow().ok()?;
+            root.source_file().map(|file| file.path().clone())
+        });
+        self.edition_of(file.as_ref())
     }
 
     /// Waits until no other task loads `path`, and then claims it unless it's loaded.
@@ -1919,11 +1949,6 @@ impl TypeLoader {
         keep_raw: bool,
         diag: &mut BuildDiagnostics,
     ) -> Option<TypeLoader> {
-        // Without a project file, the application's files are those around its root file
-        if self.compiler_config.project_roots.is_empty() {
-            let root = crate::project_file::normalize_project_file_path(path.parent());
-            self.compiler_config.project_roots.push(root);
-        }
         let doc_node: syntax_nodes::Document =
             crate::parser::parse(source_code, Some(path.clone()), diag).into();
         let parse_errors = diag.iter().cloned().collect();
@@ -2116,20 +2141,27 @@ impl TypeLoader {
     }
 
     /// The import through which the application reaches `file`, such as `@library/file.slint`,
-    /// or `@library` for any file of a library with a project file, whose main file exports
-    /// what the library makes public.
+    /// or `@library` for the main file of a library with a project file.
     pub fn library_import_for(&self, file: &SourcePath) -> Option<String> {
         let file_name = file.to_string();
         self.compiler_config.library_paths.iter().find_map(|(name, path)| {
             if crate::project_file::is_project_file(path) {
-                let project = self.library_project(path)?;
-                return is_within(&project.root, file).then(|| format!("@{name}"));
+                return self.library_project(path)?.is_main(file).then(|| format!("@{name}"));
             }
             let rest = file_name.strip_prefix(&SourcePath::new(path).to_string())?;
             match rest.strip_prefix(['/', '\\']) {
                 Some(rest) => Some(format!("@{name}/{}", rest.replace('\\', "/"))),
                 None => rest.is_empty().then(|| format!("@{name}")),
             }
+        })
+    }
+
+    /// Returns whether `file` is a file of a library with a project file, other than its main
+    /// file, which an application can't import through the library.
+    /// The files of a library whose project is also open as an application aren't private.
+    pub fn is_private_library_file(&self, file: &SourcePath) -> bool {
+        self.library_project_of(file).is_some_and(|project| {
+            !self.compiler_config.project_roots.contains(&project.root) && !project.is_main(file)
         })
     }
 
@@ -3188,8 +3220,9 @@ fn test_library_project_files() {
         CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
     compiler_config.style = Some("fluent".into());
     compiler_config.edition = Some(crate::project_file::SlintEdition::V1_19);
-    // An example of the library, with a project file of its own in the library's directory
-    compiler_config.project_roots = vec![SourcePath::new("/lib/example")];
+    // An example of the library, with a project file of its own in the library's directory,
+    // and the library's project file, as in an editor where both are open
+    compiler_config.project_roots = vec![SourcePath::new("/lib/example"), SourcePath::new("/lib")];
     compiler_config.library_paths = HashMap::from([
         ("lib".into(), PathBuf::from("/lib/slint-project.json")),
         ("rel".into(), PathBuf::from("rel/slint-project.json")),
@@ -3221,9 +3254,12 @@ export component Main { Button { } Rel { } }
     assert!(!build_diagnostics.has_errors(), "{:?}", build_diagnostics.to_string_vec());
 
     assert_eq!(
-        loader.library_import_for(&SourcePath::new("/lib/button.slint")).as_deref(),
+        loader.library_import_for(&SourcePath::new("/lib/lib.slint")).as_deref(),
         Some("@lib")
     );
+    assert_eq!(loader.library_import_for(&SourcePath::new("/lib/button.slint")), None);
+    // The library's own project is open, so its files aren't private
+    assert!(!loader.is_private_library_file(&SourcePath::new("/lib/button.slint")));
 
     assert_eq!(loader.edition_of(Some(&main)), Some(crate::project_file::SlintEdition::V1_19));
     assert_eq!(
@@ -3237,15 +3273,64 @@ export component Main { Button { } Rel { } }
     assert_eq!(loader.resolve_import_path(None, "@rel"), None);
 
     // Without a project file, the directory of the root file holds the application's files
-    let mut build_diagnostics = BuildDiagnostics::default();
-    let mut loader = TypeLoader::new(without_project_file, &mut build_diagnostics);
-    spin_on::spin_on(loader.load_root_file(
+    let (build_diagnostics, loader) = spin_on::spin_on(crate::load_root_file(
         &main,
         main_source.into(),
-        false,
-        &mut build_diagnostics,
+        BuildDiagnostics::default(),
+        without_project_file.clone(),
     ));
     assert!(!build_diagnostics.has_errors(), "{:?}", build_diagnostics.to_string_vec());
+    assert!(loader.is_private_library_file(&SourcePath::new("/lib/button.slint")));
+    assert!(!loader.is_private_library_file(&SourcePath::new("/lib/lib.slint")));
+    assert!(!loader.is_private_library_file(&main));
+
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let doc_node = crate::parser::parse(main_source.into(), Some(main), &mut build_diagnostics);
+    let (_, build_diagnostics, _) = spin_on::spin_on(crate::compile_syntax_node(
+        doc_node,
+        build_diagnostics,
+        without_project_file,
+    ));
+    assert!(!build_diagnostics.has_errors(), "{:?}", build_diagnostics.to_string_vec());
+}
+
+#[test]
+fn test_library_project_file_without_main() {
+    let project_file = SourcePath::new("/lib/slint-project.json");
+    let mut compiler_config =
+        CompilerConfiguration::new(crate::generator::OutputFormat::Interpreter);
+    compiler_config.style = Some("fluent".into());
+    compiler_config.library_paths =
+        HashMap::from([("lib".into(), PathBuf::from("/lib/slint-project.json"))]);
+    let project_file_ = project_file.clone();
+    compiler_config.open_import_callback = Some(Rc::new(move |path| {
+        let is_project_file = path == project_file_;
+        Box::pin(async move { is_project_file.then(|| Ok(r#"{ "edition": "1.19" }"#.to_owned())) })
+    }));
+
+    let mut test_diags = crate::diagnostics::BuildDiagnostics::default();
+    let doc_node = crate::parser::parse(
+        r#"import { A } from "@lib";"#.into(),
+        Some(SourcePath::new("/app/main.slint")),
+        &mut test_diags,
+    );
+    let doc_node: syntax_nodes::Document = doc_node.into();
+    let mut build_diagnostics = BuildDiagnostics::default();
+    let mut loader = TypeLoader::new(compiler_config.clone(), &mut build_diagnostics);
+    let registry = Rc::new(RefCell::new(TypeRegister::new(&loader.global_type_registry)));
+    spin_on::spin_on(loader.load_dependencies_recursively(
+        &doc_node,
+        &mut build_diagnostics,
+        &registry,
+    ));
+    assert!(build_diagnostics.has_errors());
+    // Adding 'main' to the project file must trigger a new build
+    assert!(build_diagnostics.all_loaded_files.contains(&project_file));
+    assert!(loader.is_private_library_file(&SourcePath::new("/lib/x.slint")));
+
+    compiler_config.library_paths.clear();
+    loader.set_compiler_config(compiler_config);
+    assert!(!loader.is_private_library_file(&SourcePath::new("/lib/x.slint")));
 }
 
 #[test]

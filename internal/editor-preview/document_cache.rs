@@ -192,6 +192,10 @@ impl DocumentCache {
         self.type_loader.library_import_for(file)
     }
 
+    pub fn is_private_library_file(&self, file: &SourcePath) -> bool {
+        self.type_loader.is_private_library_file(file)
+    }
+
     pub fn get_document<'a>(&'a self, url: &'_ Url) -> Option<&'a Document> {
         self.type_loader.get_document(&SourcePath::from_url(url))
     }
@@ -305,7 +309,7 @@ impl DocumentCache {
         self.open_import_callback = open_import_callback;
         self.source_file_versions = source_file_versions;
         self.format = config.format;
-        self.type_loader.compiler_config = compiler_config;
+        self.type_loader.set_compiler_config(compiler_config);
 
         self.invalidate_everything();
 

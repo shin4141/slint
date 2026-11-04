@@ -554,6 +554,15 @@ impl EditorSession {
                 )
             })
             .collect();
+        // Without a project file, the workspace holds the application's files, as in a build
+        // that compiles a root file in it
+        if config.compiler_config.project_roots.is_empty() {
+            config.compiler_config.project_roots = self
+                .workspace_roots
+                .iter()
+                .map(i_slint_compiler::source_path::SourcePath::new)
+                .collect();
+        }
         overrides.apply(None, &mut config.compiler_config);
         (config, diagnostics)
     }

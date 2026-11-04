@@ -278,12 +278,19 @@ pub fn builtin_components(document_cache: &DocumentCache, result: &mut Vec<Compo
     }));
 }
 
-fn libraryize_url(document_cache: &DocumentCache, mut url: lsp_types::Url) -> lsp_types::Url {
+/// `url` with the library import that reaches it as its path, or `None` for a file that
+/// only its own library can import.
+fn libraryize_url(
+    document_cache: &DocumentCache,
+    mut url: lsp_types::Url,
+) -> Option<lsp_types::Url> {
     let file = i_slint_compiler::source_path::SourcePath::from_url(&url);
     if let Some(import) = document_cache.library_import_for(&file) {
         url.set_path(&format!("/{import}"));
+    } else if document_cache.is_private_library_file(&file) {
+        return None;
     }
-    url
+    Some(url)
 }
 
 /// Fill the result with all exported components that matches the given filter.
@@ -307,8 +314,7 @@ pub fn all_exported_components(
         let is_std_widget = is_builtin && url.path().ends_with("/std-widgets.slint");
         let is_std_widget_interfaces =
             is_builtin && url.path().ends_with("/std-widget-interfaces.slint");
-
-        let url = libraryize_url(document_cache, url);
+        let Some(url) = libraryize_url(document_cache, url) else { continue };
 
         for (exported_name, ty) in &*doc.exports {
             let Some(c) = ty.as_ref().left() else {
@@ -380,7 +386,7 @@ pub fn all_exported_types(
             continue;
         }
 
-        let url = libraryize_url(document_cache, url);
+        let Some(url) = libraryize_url(document_cache, url) else { continue };
 
         for (exported_name, ty) in &*doc.exports {
             // Only process struct/enum exports (Either::Right); components are Either::Left
@@ -411,8 +417,9 @@ pub fn file_local_components(
     url: &lsp_types::Url,
     result: &mut Vec<ComponentInformation>,
 ) {
-    let library_url = libraryize_url(document_cache, url.clone());
-    if library_url.path() != url.path() {
+    if libraryize_url(document_cache, url.clone())
+        .is_none_or(|library_url| library_url.path() != url.path())
+    {
         return;
     }
     let Some(doc) = document_cache.get_document(url) else {
