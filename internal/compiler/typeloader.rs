@@ -1001,12 +1001,14 @@ struct LibraryProject {
     /// The directory of the project file, which holds the library's files.
     root: SourcePath,
     main: Option<SourcePath>,
+    edition: crate::project_file::SlintEdition,
     include_paths: Vec<PathBuf>,
     library_paths: HashMap<String, PathBuf>,
 }
 
 /// The settings for the files of the application, or of a library with a project file.
 struct ProjectSettings<'a> {
+    edition: Option<crate::project_file::SlintEdition>,
     include_paths: &'a [PathBuf],
     library_paths: &'a HashMap<String, PathBuf>,
 }
@@ -1686,6 +1688,7 @@ impl TypeLoader {
                         source_path: project.source_path().clone(),
                         root: project.source_path().parent(),
                         main: project.main(),
+                        edition: project.edition(),
                         include_paths: data.include_paths.unwrap_or_default(),
                         library_paths: data.library_paths.unwrap_or_default(),
                     })
@@ -1782,14 +1785,32 @@ impl TypeLoader {
     fn project_settings(&self, file: Option<&SourcePath>) -> ProjectSettings<'_> {
         match file.and_then(|file| self.library_project_of(file)) {
             Some(project) => ProjectSettings {
+                edition: Some(project.edition),
                 include_paths: &project.include_paths,
                 library_paths: &project.library_paths,
             },
             None => ProjectSettings {
+                edition: self.compiler_config.edition,
                 include_paths: &self.compiler_config.include_paths,
                 library_paths: &self.compiler_config.library_paths,
             },
         }
+    }
+
+    /// The edition of the project that `file` belongs to.
+    pub fn edition_of(
+        &self,
+        file: Option<&SourcePath>,
+    ) -> Option<crate::project_file::SlintEdition> {
+        self.project_settings(file).edition
+    }
+
+    /// The edition of the component that declares `element`, which inlining doesn't change.
+    pub fn edition_of_element(
+        &self,
+        element: &object_tree::Element,
+    ) -> Option<crate::project_file::SlintEdition> {
+        self.edition_of(element.source_file().map(|file| file.path()))
     }
 
     /// Waits until no other task loads `path`, and then claims it unless it's loaded.
@@ -3202,6 +3223,12 @@ export component Main { Button { } Rel { } }
     assert_eq!(
         loader.library_import_for(&SourcePath::new("/lib/button.slint")).as_deref(),
         Some("@lib")
+    );
+
+    assert_eq!(loader.edition_of(Some(&main)), Some(crate::project_file::SlintEdition::V1_19));
+    assert_eq!(
+        loader.edition_of(Some(&SourcePath::new("/lib/button.slint"))),
+        Some((1, 18).into())
     );
 
     let relative_project_file = SourcePath::new(cwd.join("rel/slint-project.json"));

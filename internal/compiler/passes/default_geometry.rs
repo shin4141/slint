@@ -26,6 +26,7 @@ use crate::layout::{
 use crate::object_tree::{Component, Document, Element, ElementRc};
 use crate::project_file::SlintEdition;
 use crate::symbol_counters::SymbolCounters;
+use crate::typeloader::TypeLoader;
 use smol_str::{SmolStr, format_smolstr};
 use std::collections::{BTreeMap, HashSet};
 
@@ -33,10 +34,8 @@ pub fn default_geometry(
     root_component: &Rc<Component>,
     diag: &mut BuildDiagnostics,
     symbol_counters: &SymbolCounters,
-    edition: Option<SlintEdition>,
+    type_loader: &TypeLoader,
 ) {
-    // #407: an `if`/`for` child counts toward its non-layout parent's size
-    let repeated_children_constrain_parent = edition.is_some_and(|v| v >= SlintEdition::V1_19);
     crate::object_tree::recurse_elem_including_sub_components(
         root_component,
         &None,
@@ -52,7 +51,7 @@ pub fn default_geometry(
             w100 |= fix_percent_size(elem, parent, "width", diag, symbol_counters);
             h100 |= fix_percent_size(elem, parent, "height", diag, symbol_counters);
 
-            gen_layout_info_prop(elem, diag, symbol_counters, repeated_children_constrain_parent);
+            gen_layout_info_prop(elem, diag, symbol_counters, type_loader);
 
             let builtin_type = match elem.borrow().builtin_type() {
                 Some(b) if !elem.borrow().is_flickable_content => b,
@@ -195,20 +194,15 @@ fn gen_layout_info_prop(
     elem: &ElementRc,
     diag: &mut BuildDiagnostics,
     symbol_counters: &SymbolCounters,
-    repeated_children_constrain_parent: bool,
+    type_loader: &TypeLoader,
 ) {
     if elem.borrow().layout_info_prop.is_some() || elem.borrow().is_flickable_content {
         return;
     }
     for c in elem.borrow().children.iter().filter(|c| has_no_explicit_position(c)) {
-        gen_layout_info_prop(c, diag, symbol_counters, repeated_children_constrain_parent);
+        gen_layout_info_prop(c, diag, symbol_counters, type_loader);
     }
-    gen_layout_info_prop_from_children(
-        elem,
-        diag,
-        symbol_counters,
-        repeated_children_constrain_parent,
-    );
+    gen_layout_info_prop_from_children(elem, diag, symbol_counters, type_loader);
 }
 
 fn has_no_explicit_position(elem: &ElementRc) -> bool {
@@ -219,7 +213,7 @@ fn gen_layout_info_prop_from_children(
     elem: &ElementRc,
     diag: &mut BuildDiagnostics,
     symbol_counters: &SymbolCounters,
-    repeated_children_constrain_parent: bool,
+    type_loader: &TypeLoader,
 ) {
     let child_infos = elem
         .borrow()
@@ -267,9 +261,10 @@ fn gen_layout_info_prop_from_children(
                         // return above doesn't catch it. A ComponentContainer's
                         // placeholder is a fake `if false:` repeater, and the container
                         // reports the embedded tree's constraints itself.
-                        if !repeated_children_constrain_parent
-                            || r.is_listview.is_some()
+                        if r.is_listview.is_some()
                             || c.borrow().is_component_placeholder
+                            || type_loader.edition_of_element(&c.borrow())
+                                < Some(SlintEdition::V1_19)
                         {
                             return None;
                         }

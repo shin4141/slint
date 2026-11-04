@@ -23,9 +23,9 @@ use crate::namedreference::NamedReference;
 use crate::object_tree::{Document, Element, ElementRc, PropertyAnimation, find_parent_element};
 use derive_more as dm;
 
-use crate::CompilerConfiguration;
 use crate::expression_tree::Callable;
 use crate::project_file::SlintEdition;
+use crate::typeloader::TypeLoader;
 use smol_str::{SmolStr, ToSmolStr};
 
 /// Represent the kind of property for the DefaultFontSize based on the `default-font-size`` property of every `Window``
@@ -65,9 +65,10 @@ type ReverseAliases = HashMap<NamedReference, Vec<NamedReference>>;
 
 pub fn binding_analysis(
     doc: &Document,
-    compiler_config: &CompilerConfiguration,
+    type_loader: &TypeLoader,
     diag: &mut BuildDiagnostics,
 ) -> GlobalAnalysis {
+    let compiler_config = &type_loader.compiler_config;
     let mut global_analysis = GlobalAnalysis {
         const_scale_factor: compiler_config.const_scale_factor,
         const_image_sizes: compiler_config.const_image_sizes,
@@ -77,14 +78,7 @@ pub fn binding_analysis(
     mark_used_base_properties(doc);
     propagate_is_set_on_aliases(doc, &mut reverse_aliases);
     check_window_properties(doc, &mut global_analysis);
-    perform_binding_analysis(
-        doc,
-        &reverse_aliases,
-        &mut global_analysis,
-        compiler_config.error_on_binding_loop_with_window_layout,
-        compiler_config.edition,
-        diag,
-    );
+    perform_binding_analysis(doc, &reverse_aliases, &mut global_analysis, type_loader, diag);
     global_analysis
 }
 /// A reference to a property which might be deep in a component path.
@@ -187,8 +181,7 @@ struct AnalysisContext<'a> {
     /// When set, one of the property in the `currently_analyzing` stack is the window layout property
     /// And we should issue a warning if that's part of a loop instead of an error
     window_layout_property: Option<PropertyPath>,
-    error_on_binding_loop_with_window_layout: bool,
-    edition: Option<SlintEdition>,
+    type_loader: &'a TypeLoader,
     /// Set once `MAX_ANALYSIS_DEPTH` was reported, so a document yields one error
     depth_limit_reported: bool,
     /// For each place a binding loop diagnostic or note points at, whether one of those loops
@@ -201,13 +194,11 @@ fn perform_binding_analysis(
     doc: &Document,
     reverse_aliases: &ReverseAliases,
     global_analysis: &mut GlobalAnalysis,
-    error_on_binding_loop_with_window_layout: bool,
-    edition: Option<SlintEdition>,
+    type_loader: &TypeLoader,
     diag: &mut BuildDiagnostics,
 ) {
     let mut context = AnalysisContext {
-        error_on_binding_loop_with_window_layout,
-        edition,
+        type_loader,
         visited: HashSet::new(),
         currently_analyzing: Default::default(),
         window_layout_property: None,
@@ -620,11 +611,17 @@ fn report_binding_loop(
     }
     // Skip a cycle whose bindings were all reported already: most often it's one reported cycle
     // entered from another of its properties. One that shares only some is another loop.
-    // From edition 1.19, an error one is still reported: it may be a shorter loop inside an
-    // earlier one, such as a warning through the window layout.
-    let is_error = context.error_on_binding_loop_with_window_layout || !has_window_layout;
-    let report_hidden_errors = context.edition.is_some_and(|v| v >= SlintEdition::V1_19);
-    if all_reported && !(is_error && report_hidden_errors) {
+    // When one of its bindings is in a file of edition 1.19 or newer, an error one is still
+    // reported: it may be a shorter loop inside an earlier one, such as a warning through the
+    // window layout.
+    let is_error = context.type_loader.compiler_config.error_on_binding_loop_with_window_layout
+        || !has_window_layout;
+    let report_hidden_errors = || {
+        reportable.iter().filter_map(|(_, span, _)| span.source_file.as_ref()).any(|file| {
+            context.type_loader.edition_of(Some(file.path())) >= Some(SlintEdition::V1_19)
+        })
+    };
+    if all_reported && !(is_error && report_hidden_errors()) {
         return;
     }
     // Of equal blame, one in the user's own file over one in a widget, then the one written
