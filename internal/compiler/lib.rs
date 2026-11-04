@@ -231,6 +231,11 @@ pub struct CompilerConfiguration {
     /// there, and there is no such warning without it.
     pub edition_location: Option<diagnostics::SourceLocation>,
 
+    /// The directories of the application's project files. A file in one of them belongs to the
+    /// application rather than to a library whose directory contains it,
+    /// such as a library's example.
+    pub project_roots: Vec<source_path::SourcePath>,
+
     /// The domain used as one of the parameter to the translate function
     pub translation_domain: Option<String>,
     /// When Some, this is the path where the translations are looked at to bundle the translations
@@ -392,6 +397,7 @@ impl CompilerConfiguration {
             unknown_experimental_features,
             edition: None,
             edition_location: None,
+            project_roots: Vec::new(),
             translation_domain: None,
             default_translation_context: DefaultTranslationContext::ComponentName,
             no_native_menu: false,

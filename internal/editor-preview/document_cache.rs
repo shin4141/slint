@@ -188,6 +188,10 @@ impl DocumentCache {
         self.source_file_versions.borrow().get(path).and_then(|v| *v)
     }
 
+    pub fn library_import_for(&self, file: &SourcePath) -> Option<String> {
+        self.type_loader.library_import_for(file)
+    }
+
     pub fn get_document<'a>(&'a self, url: &'_ Url) -> Option<&'a Document> {
         self.type_loader.get_document(&SourcePath::from_url(url))
     }

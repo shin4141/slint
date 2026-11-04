@@ -279,20 +279,9 @@ pub fn builtin_components(document_cache: &DocumentCache, result: &mut Vec<Compo
 }
 
 fn libraryize_url(document_cache: &DocumentCache, mut url: lsp_types::Url) -> lsp_types::Url {
-    use i_slint_compiler::source_path::SourcePath;
-    let url_path = SourcePath::from_url(&url).to_string();
-    let library_path =
-        document_cache.compiler_configuration().compiler_config.library_paths.iter().find_map(
-            |(name, path)| {
-                let rest = url_path.strip_prefix(&SourcePath::new(path).to_string())?;
-                match rest.strip_prefix(['/', '\\']) {
-                    Some(rest) => Some(format!("/@{name}/{}", rest.replace('\\', "/"))),
-                    None => rest.is_empty().then(|| format!("/@{name}")),
-                }
-            },
-        );
-    if let Some(library_path) = library_path {
-        url.set_path(&library_path);
+    let file = i_slint_compiler::source_path::SourcePath::from_url(&url);
+    if let Some(import) = document_cache.library_import_for(&file) {
+        url.set_path(&format!("/{import}"));
     }
     url
 }
